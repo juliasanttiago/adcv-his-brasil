@@ -1,0 +1,496 @@
+import matplotlib.pyplot as plt
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import Ridge, LinearRegression
+from sklearn.multioutput import MultiOutputRegressor
+from sklearn.neural_network import MLPRegressor
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_squared_error, r2_score
+import warnings
+warnings.filterwarnings('ignore')
+
+print("MODELO HÍBRIDO COMPLETO - MATRIZ ELÉTRICA BRASILEIRA")
+print("="*65)
+
+# === 1. CARREGAR DADOS ===
+df_variaveis = pd.read_csv("variaveis_externas_template.csv")
+df_matriz = pd.read_csv("base_matriz_eletrica_normalizada.csv")
+
+# === 2. CALCULAR TENDÊNCIAS HISTÓRICAS (2014-2023) ===
+def calcular_tendencias_historicas(df_matriz, ano_inicio=2014):
+    """
+    Calcula tendências robustas a partir de 2014 (pós-crise hídrica)
+    """
+    df_periodo = df_matriz[df_matriz['ANO'] >= ano_inicio].copy()
+    
+    print(f"TENDÊNCIAS HISTÓRICAS ({ano_inicio}-2023) - {len(df_periodo)} anos")
+    print("-" * 50)
+    
+    tendencias = {}
+    fontes = [col for col in df_matriz.columns if col != 'ANO']
+    
+    for fonte in fontes:
+        valores = df_periodo[fonte].values
+        anos = df_periodo['ANO'].values
+        
+        if len(valores) >= 3:
+            # Regressão linear para tendência
+            coef = np.polyfit(anos, valores, 1)[0]
+            intercept = np.polyfit(anos, valores, 1)[1]
+            
+            # R² da tendência
+            y_pred = coef * anos + intercept
+            ss_res = np.sum((valores - y_pred) ** 2)
+            ss_tot = np.sum((valores - np.mean(valores)) ** 2)
+            r2 = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+            
+            tendencias[fonte] = {
+                'coef': coef,
+                'intercept': intercept,
+                'r2': r2,
+                'valor_2023': valores[-1],
+                'n_anos': len(valores)
+            }
+            
+            # Mostrar tendências significativas
+            if abs(coef) > 0.1 or r2 > 0.5:
+                direcao = "/" if coef > 0 else "\"
+                confianca = "🟢" if r2 > 0.7 else "🟡" if r2 > 0.4 else "🔴"
+                print(f"{direcao} {fonte}: {coef:+.3f}%/ano (R²={r2:.2f}) {confianca}")
+        else:
+            # Fallback para fontes com poucos dados
+            ultimo_valor = valores[-1] if len(valores) > 0 else 0
+            tendencias[fonte] = {
+                'coef': 0, 'intercept': ultimo_valor, 'r2': 0,
+                'valor_2023': ultimo_valor, 'n_anos': len(valores)
+            }
+    
+    return tendencias
+
+# === 3. CRIAR VARIÁVEIS DE POLÍTICA REALÍSTICAS ===
+def criar_variaveis_realistas(df_variaveis):
+    """
+    Cria transições em S-curve baseadas na realidade brasileira
+    """
+    df_real = df_variaveis.copy()
+    
+    print(f"\nCRIANDO TRANSIÇÕES REALÍSTICAS")
+    print("-" * 40)
+    
+    for i, row in df_real.iterrows():
+        ano = row['ANO']
+        
+        if ano <= 2024:
+            continue  # Manter dados históricos
+            
+        # META_SOLAR: S-curve com aceleração pós-2030
+        if ano <= 2030:
+            # Fase 1: Crescimento lento (decolagem)
+            df_real.at[i, 'META_SOLAR'] = 0.1 + (ano - 2025) * 0.08
+        elif ano <= 2040:
+            # Fase 2: Crescimento acelerado (metas governamentais)
+            base = 0.5
+            progresso = (ano - 2030) / 10
+            df_real.at[i, 'META_SOLAR'] = base + progresso * 0.4
+        else:
+            # Fase 3: Estabilização
+            df_real.at[i, 'META_SOLAR'] = 0.9
+        
+        # NOVAS_TECNOLOGIAS: Crescimento gradual
+        if ano <= 2035:
+            df_real.at[i, 'NOVAS_TECNOLOGIAS'] = min(0.8, (ano - 2025) * 0.06)
+        else:
+            df_real.at[i, 'NOVAS_TECNOLOGIAS'] = 0.8
+        
+        # POLITICA_TERMICA_GAS: Ciclos políticos realísticos
+        ciclo_base = 0.3 + 0.4 * np.sin((ano - 2025) * 0.3)
+        ruido = np.random.RandomState(ano).normal(0, 0.1)  # Ruído determinístico
+        df_real.at[i, 'POLITICA_TERMICA_GAS'] = max(0, min(1, ciclo_base + ruido))
+    
+    print("Transições S-curve aplicadas (lento → rápido → estabilização)")
+    return df_real
+
+# === 4. FEATURE ENGINEERING ===
+def criar_features_avancadas(df_variaveis):
+    """
+    Cria features que capturam interações entre políticas
+    """
+    df_eng = df_variaveis.copy()
+    
+    print(f"FEATURE ENGINEERING")
+    print("-" * 25)
+    
+    # Sinergias entre políticas
+    df_eng['SOLAR_EOLICA_SINERGIA'] = df_eng['META_SOLAR'] * df_eng['META_EOLICA']
+    df_eng['RENOVAVEIS_TOTAL'] = (df_eng['META_SOLAR'] + df_eng['META_EOLICA'] + 
+                                  df_eng['META_HIDRICA'] + df_eng['META_CANA']) / 4
+    
+    # Competição térmica vs renovável
+    df_eng['COMPETICAO_TERMICA'] = df_eng['POLITICA_TERMICA_GAS'] * (1 - df_eng['RENOVAVEIS_TOTAL'])
+    
+    # Tendência temporal normalizada
+    df_eng['TENDENCIA_ANOS'] = (df_eng['ANO'] - df_eng['ANO'].min()) / (df_eng['ANO'].max() - df_eng['ANO'].min())
+    
+    # Aceleração pós-2030 (não-linear)
+    df_eng['ACELERACAO_POS_2030'] = np.where(df_eng['ANO'] >= 2030, 
+                                            ((df_eng['ANO'] - 2030) / 10) ** 2, 0)
+    
+    return df_eng
+
+# === 5. PROJEÇÃO HÍBRIDA APRIMORADA ===
+def projecao_hibrida_avancada(df_futuro, tendencias, nome_cenario="BASE", intensidade=1.0):
+    """
+    Combina tendências históricas + ajustes de política + restrições realísticas
+    """
+    resultados = []
+    
+    for _, row in df_futuro.iterrows():
+        ano = row['ANO']
+        anos_futuro = ano - 2023
+        
+        projecao_ano = {'ANO': ano}
+        
+        for fonte, info_tend in tendencias.items():
+            # 1. Projeção base (tendência histórica)
+            valor_base = info_tend['valor_2023'] + info_tend['coef'] * anos_futuro
+            
+            # 2. Ajustes específicos por fonte e cenário
+            if fonte == 'SOLAR':
+                meta_solar = row.get('META_SOLAR', 0)
+                novas_tech = row.get('NOVAS_TECNOLOGIAS', 0)
+                
+                # Multiplicador de política
+                multiplicador = 1 + (meta_solar * novas_tech * intensidade * 2)
+                
+                # Crescimento por cenário
+                if nome_cenario == "RENOVAVEIS_ACELERADAS":
+                    valor_solar = info_tend['valor_2023'] * (1.35 ** (anos_futuro * multiplicador * 0.15))
+                    valor_solar = min(valor_solar, 25)  # Limite agressivo
+                elif nome_cenario == "FOSSIL_RESISTENTE":
+                    valor_solar = info_tend['valor_2023'] * (1.15 ** (anos_futuro * multiplicador * 0.08))
+                    valor_solar = min(valor_solar, 8)   # Limite conservador
+                else:  # BASE e outros
+                    valor_solar = info_tend['valor_2023'] * (1.25 ** (anos_futuro * multiplicador * 0.12))
+                    valor_solar = min(valor_solar, 18)
+                
+                valor_final = valor_solar
+                
+            elif fonte == 'EOLICA':
+                meta_eolica = row.get('META_EOLICA', 0)
+                
+                if nome_cenario == "FOSSIL_RESISTENTE":
+                    valor_final = valor_base * (0.8 + 0.2 * meta_eolica * intensidade)
+                else:
+                    multiplicador = 1.1 if nome_cenario == "RENOVAVEIS_ACELERADAS" else 1.0
+                    valor_final = valor_base * (1 + 0.3 * meta_eolica * intensidade * multiplicador)
+                
+                valor_final = min(valor_final, 35)
+                
+            elif fonte == 'HIDRAULICA':
+                # Pressão de outras renováveis
+                pressao = (row.get('META_SOLAR', 0) + row.get('META_EOLICA', 0) + 
+                          row.get('NOVAS_TECNOLOGIAS', 0)) / 3
+                
+                if nome_cenario == "FOSSIL_RESISTENTE":
+                    declinio = pressao * 0.3 * intensidade * anos_futuro
+                    valor_final = valor_base - declinio
+                    valor_final = max(valor_final, 50)  # Mínimo alto
+                elif nome_cenario == "RENOVAVEIS_ACELERADAS":
+                    declinio = pressao * 0.8 * intensidade * anos_futuro
+                    valor_final = valor_base - declinio
+                    valor_final = max(valor_final, 30)  # Declínio acentuado
+                else:  # BASE
+                    declinio = pressao * 0.5 * intensidade * anos_futuro
+                    valor_final = valor_base - declinio
+                    valor_final = max(valor_final, 35)
+                    
+            elif fonte == 'GAS_NATURAL':
+                politica_gas = row.get('POLITICA_TERMICA_GAS', 0)
+                
+                if nome_cenario == "FOSSIL_RESISTENTE":
+                    valor_final = valor_base * (1 + politica_gas * 1.2 * intensidade)
+                    valor_final = min(valor_final, 18)
+                else:
+                    valor_final = valor_base * (1 + politica_gas * 0.4 * intensidade)
+                    valor_final = min(valor_final, 12)
+                    
+            elif fonte == 'NUCLEAR':
+                meta_nuclear = row.get('META_NUCLEAR', 0)
+                
+                if nome_cenario == "NUCLEAR_PLUS":
+                    valor_final = valor_base * (1 + meta_nuclear * 1.0 * intensidade)
+                    valor_final = min(valor_final, 10)
+                elif nome_cenario != "FOSSIL_RESISTENTE":
+                    valor_final = valor_base * (1 + meta_nuclear * 0.3 * intensidade)
+                    valor_final = min(valor_final, 6)
+                else:
+                    valor_final = valor_base
+                    
+            else:
+                # Outras fontes: tendência + pequenos ajustes
+                valor_final = valor_base
+            
+            projecao_ano[fonte] = max(0, valor_final)
+        
+        resultados.append(projecao_ano)
+    
+    return pd.DataFrame(resultados)
+
+# === 6. CRIAR CENÁRIOS EXTREMOS ===
+def criar_cenarios_diferenciados(df_futuro_base):
+    """
+    Cenários com diferenças marcantes para análise de sensibilidade
+    """
+    print(f"CRIANDO CENÁRIOS DIFERENCIADOS")
+    print("-" * 35)
+    
+    cenarios = {}
+    
+    # BASE - transição moderada
+    cenarios["BASE"] = df_futuro_base.copy()
+    
+    # RENOVAVEIS_ACELERADAS - transição energética agressiva
+    cenarios["RENOVAVEIS_ACELERADAS"] = df_futuro_base.copy()
+    mask_renv = cenarios["RENOVAVEIS_ACELERADAS"]["ANO"] >= 2025
+    cenarios["RENOVAVEIS_ACELERADAS"].loc[mask_renv, "META_SOLAR"] *= 2.0
+    cenarios["RENOVAVEIS_ACELERADAS"].loc[mask_renv, "META_EOLICA"] *= 1.5
+    cenarios["RENOVAVEIS_ACELERADAS"].loc[mask_renv, "NOVAS_TECNOLOGIAS"] *= 1.8
+    cenarios["RENOVAVEIS_ACELERADAS"].loc[mask_renv, "POLITICA_TERMICA_GAS"] *= 0.3
+    
+    # FOSSIL_RESISTENTE - resistência à mudança
+    cenarios["FOSSIL_RESISTENTE"] = df_futuro_base.copy()
+    mask_foss = cenarios["FOSSIL_RESISTENTE"]["ANO"] >= 2025
+    cenarios["FOSSIL_RESISTENTE"].loc[mask_foss, "META_SOLAR"] *= 0.3
+    cenarios["FOSSIL_RESISTENTE"].loc[mask_foss, "META_EOLICA"] *= 0.7
+    cenarios["FOSSIL_RESISTENTE"].loc[mask_foss, "NOVAS_TECNOLOGIAS"] *= 0.4
+    cenarios["FOSSIL_RESISTENTE"].loc[mask_foss, "POLITICA_TERMICA_GAS"] *= 2.0
+    cenarios["FOSSIL_RESISTENTE"]["POLITICA_TERMICA_GAS"] = np.minimum(
+        cenarios["FOSSIL_RESISTENTE"]["POLITICA_TERMICA_GAS"], 1.0
+    )
+    
+    # NUCLEAR_PLUS - aposta na energia nuclear
+    cenarios["NUCLEAR_PLUS"] = df_futuro_base.copy()
+    mask_nuc = cenarios["NUCLEAR_PLUS"]["ANO"] >= 2030
+    cenarios["NUCLEAR_PLUS"].loc[mask_nuc, "META_NUCLEAR"] = 1.0
+    cenarios["NUCLEAR_PLUS"].loc[mask_nuc, "META_SOLAR"] *= 1.2
+    
+    # Recriar features para todos os cenários
+    for nome in cenarios:
+        cenarios[nome] = criar_features_avancadas(cenarios[nome])
+    
+    print(f" {len(cenarios)} cenários criados (BASE, RENOVAVEIS_ACELERADAS, FOSSIL_RESISTENTE, NUCLEAR_PLUS)")
+    return cenarios
+
+# === 7. EXECUTAR PIPELINE COMPLETO ===
+
+# Calcular tendências
+tendencias = calcular_tendencias_historicas(df_matriz)
+
+# Preparar dados
+df_variaveis_real = criar_variaveis_realistas(df_variaveis)
+df_variaveis_eng = criar_features_avancadas(df_variaveis_real)
+df_futuro_base = df_variaveis_eng[df_variaveis_eng["ANO"] > 2023].copy()
+
+# Criar cenários
+cenarios = criar_cenarios_diferenciados(df_futuro_base)
+
+# Intensidades de política por cenário
+intensidades = {
+    "BASE": 1.0,
+    "RENOVAVEIS_ACELERADAS": 1.5,
+    "FOSSIL_RESISTENTE": 0.7,
+    "NUCLEAR_PLUS": 1.2
+}
+
+# === 8. PROJEÇÕES FINAIS ===
+print(f"EXECUTANDO PROJEÇÕES HÍBRIDAS")
+print("=" * 40)
+
+resultados_finais = {}
+
+for nome_cenario, df_cenario in cenarios.items():
+    print(f"\n--- {nome_cenario} ---")
+    
+    intensidade = intensidades.get(nome_cenario, 1.0)
+    
+    # Fazer projeção
+    df_resultado = projecao_hibrida_avancada(
+        df_cenario, tendencias, nome_cenario, intensidade
+    )
+    
+    # Normalizar para somar 100%
+    fontes_cols = [col for col in df_resultado.columns if col != 'ANO']
+    for idx in df_resultado.index:
+        soma = df_resultado.loc[idx, fontes_cols].sum()
+        if soma > 0:
+            df_resultado.loc[idx, fontes_cols] = (df_resultado.loc[idx, fontes_cols] / soma * 100)
+    
+    resultados_finais[nome_cenario] = df_resultado
+    
+    # Mostrar resultados chave
+    for ano_ref in [2030, 2040, 2050]:
+        if ano_ref in df_resultado['ANO'].values:
+            linha = df_resultado[df_resultado['ANO'] == ano_ref]
+            if not linha.empty:
+                principais = linha[fontes_cols].iloc[0].nlargest(4)
+                print(f"\n{ano_ref}:")
+                for fonte, valor in principais.items():
+                    print(f"  {fonte}: {valor:.1f}%")
+                
+                # Métricas especiais
+                solar = linha['SOLAR'].iloc[0] if 'SOLAR' in linha.columns else 0
+                hidro = linha['HIDRAULICA'].iloc[0] if 'HIDRAULICA' in linha.columns else 0
+                eolica = linha['EOLICA'].iloc[0] if 'EOLICA' in linha.columns else 0
+                
+                print(f"  Solar: {solar:.1f}% | Hidro: {hidro:.1f}% | Eólica: {eolica:.1f}%")
+
+# === 9. ANÁLISE COMPARATIVA ===
+print(f"\nANÁLISE COMPARATIVA DOS CENÁRIOS EM 2050")
+print("=" * 55)
+
+dados_2050 = {}
+for nome, df_resultado in resultados_finais.items():
+    linha_2050 = df_resultado[df_resultado['ANO'] == 2050]
+    if not linha_2050.empty:
+        dados_2050[nome] = linha_2050[fontes_cols].iloc[0]
+
+if dados_2050:
+    df_comp_2050 = pd.DataFrame(dados_2050).round(1)
+    
+    # Principais fontes
+    fontes_principais = ['HIDRAULICA', 'SOLAR', 'EOLICA', 'GAS_NATURAL', 'NUCLEAR', 'BAGAÇO_CANA']
+    fontes_disponiveis = [f for f in fontes_principais if f in df_comp_2050.index]
+    
+    print("\nTabela Comparativa (%):")
+    print(df_comp_2050.loc[fontes_disponiveis].to_string())
+    
+    # Índice de diversificação (Herfindahl)
+    print(f"\nDIVERSIFICAÇÃO DA MATRIZ (2050):")
+    for cenario in df_comp_2050.columns:
+        valores = df_comp_2050[cenario].values
+        hhi = sum((v/100)**2 for v in valores if v > 0)
+        nivel = 'Baixa' if hhi < 0.3 else 'Média' if hhi < 0.4 else 'Alta'
+        print(f"   {cenario}: HHI = {hhi:.3f} ({nivel} concentração)")
+
+# === 10. VISUALIZAÇÕES FINAIS ===
+print(f"\n... GERANDO VISUALIZAÇÕES...")
+
+fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+axes = axes.ravel()
+
+fontes_viz = ['HIDRAULICA', 'SOLAR', 'EOLICA', 'GAS_NATURAL']
+cores = {'BASE': 'blue', 'RENOVAVEIS_ACELERADAS': 'green', 
+         'FOSSIL_RESISTENTE': 'red', 'NUCLEAR_PLUS': 'purple'}
+
+for i, fonte in enumerate(fontes_viz):
+    if i < len(axes):
+        
+        # Plotar cada cenário
+        for nome_cenario, df_resultado in resultados_finais.items():
+            if fonte in df_resultado.columns:
+                cor = cores.get(nome_cenario, 'gray')
+                axes[i].plot(df_resultado['ANO'], df_resultado[fonte], 
+                           label=nome_cenario, color=cor, linewidth=3, 
+                           marker='o', markersize=4, alpha=0.8)
+        
+        # Linha de referência (2023)
+        if fonte in tendencias:
+            valor_atual = tendencias[fonte]['valor_2023']
+            axes[i].axhline(y=valor_atual, color='black', linestyle='--', 
+                           alpha=0.5, label=f'Atual: {valor_atual:.1f}%')
+        
+        axes[i].set_title(f'{fonte} - Differentiated Scenarios', fontweight='bold', fontsize=12)
+        axes[i].set_xlabel('Year')
+        axes[i].set_ylabel('Share (%)')
+        axes[i].legend(fontsize=9)
+        axes[i].grid(True, alpha=0.3)
+        axes[i].set_xlim(2023, 2050)
+        axes[i].set_ylim(0, max(100, axes[i].get_ylim()[1]))
+
+plt.tight_layout()
+# plt.suptitle('Final hybrid model - Matriz Elétrica Brasileira\nTendências Históricas + Políticas + Restrições Realísticas', fontsize=14, fontweight='bold', y=1.02)
+plt.suptitle('Final hybrid model - Brazilian grid\nHistorical Trends + Policies + Realistic Constraints', 
+             fontsize=14, fontweight='bold', y=1.02)
+plt.savefig('modelo_hibrido_EN.png', dpi=300, bbox_inches='tight')
+plt.show()
+
+# === 11. RESUMO EXECUTIVO ===
+print("\n" + "="*65)
+print("MODELO HÍBRIDO COMPLETO - RESUMO EXECUTIVO")
+print("="*65)
+
+print(f"\nCARACTERÍSTICAS DO MODELO:")
+print(f"   • Tendências históricas: 2014-2023 (pós-crise hídrica)")
+print(f"   • Transições S-curve realísticas")
+print(f"   • 5 features avançadas (sinergias, competição)")
+print(f"   • 4 cenários diferenciados")
+print(f"   • Restrições por fonte energética")
+
+print(f"\nRESULTADOS BASE (2050):")
+base_2050 = dados_2050.get('BASE', {})
+if base_2050 is not None and len(base_2050) > 0:
+    principais_base = base_2050.nlargest(3)
+    for fonte, valor in principais_base.items():
+        print(f"   • {fonte}: {valor:.1f}%")
+
+print(f"\nDIFERENCIAÇÃO DOS CENÁRIOS (range em 2050):")
+if len(dados_2050) > 1:
+    for fonte in ['SOLAR', 'HIDRAULICA', 'EOLICA']:
+        if fonte in df_comp_2050.index:
+            valores_fonte = df_comp_2050.loc[fonte]
+            min_val, max_val = valores_fonte.min(), valores_fonte.max()
+            print(f"   • {fonte}: {min_val:.1f}% - {max_val:.1f}% (Δ{max_val-min_val:.1f}%)")
+
+print(f"\nPRÓXIMAS VALIDAÇÕES RECOMENDADAS:")
+print(f"   1. Comparar com projeções EPE PNE 2050")
+print(f"   2. Incluir custos levelizados de energia (LCOE)")
+print(f"   3. Considerar limitações de transmissão")
+print(f"   4. Análise de sensibilidade climática")
+
+print(f"\nMODELO PRONTO PARA USO OPERACIONAL!")
+print("="*65)
+
+import pandas as pd
+import numpy as np
+import warnings
+
+# Carregamento dos dados (assumindo que já foram lidos pelo código anterior)
+# df_matriz = pd.read_csv("base_matriz_eletrica_normalizada.csv")
+# resultados_finais = {
+#     "BASE": df_projecao_base,
+#     "RENOVAVEIS_ACELERADAS": df_projecao_renov,
+#     ...
+# }
+
+print("\nCONCATENANDO DADOS HISTÓRICOS (2015-2023) COM PROJEÇÕES...")
+
+# Filtrar dados históricos de 2015 a 2023
+historico = df_matriz[(df_matriz['ANO'] >= 2015) & (df_matriz['ANO'] <= 2023)].copy()
+# Garantir que as colunas são as mesmas, só para conferência
+fontes_cols = [col for col in historico.columns if col != 'ANO']
+historico = historico[['ANO'] + fontes_cols]
+
+resultados_completos = {}
+for nome_cenario, df_projetado in resultados_finais.items():
+    # Concatena o histórico e a projeção
+    df_completo = pd.concat([historico, df_projetado], ignore_index=True)
+    df_completo = df_completo.sort_values(by='ANO').reset_index(drop=True)
+    resultados_completos[nome_cenario] = df_completo
+
+# Exibir os primeiros e últimos anos para verificação
+print("\nDados consolidados (primeiras linhas):")
+print(resultados_completos['BASE'].head())
+print("\nDados consolidados (últimas linhas):")
+print(resultados_completos['BASE'].tail())
+
+print("\nDataFrame completo para todos os cenários, de 2015 até 2065, criado com sucesso.")
+
+# Criar um DataFrame único com todos os cenários
+df_completo_final = pd.DataFrame()
+for cenario, df in resultados_completos.items():
+    df['CENARIO'] = cenario
+    df_completo_final = pd.concat([df_completo_final, df], ignore_index=True)
+    
+df_completo_final.to_csv("matriz_eletrica_completa_2015-2065.csv", index=False)
+print("\nMatriz elétrica completa (2015-2065) salva em: 'matriz_eletrica_completa_2015-2065.csv'")
