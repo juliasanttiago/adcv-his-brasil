@@ -1,0 +1,236 @@
+import subprocess
+import time
+import os
+import shutil
+
+"""
+esse método cria duas pastas e salva o texto da variável string no arquivo da database.csv
+"""
+def initiate_files():
+    arquivo = 'resultados/'
+    if os.path.exists(arquivo):
+        shutil.rmtree("resultados")
+    os.mkdir("./resultados")
+    os.mkdir("./resultados/csv_individual")
+    string = "mes;T_ext;T_sala;T_quarto_1;T_quarto_2;kwh_quarto_1;kwh_quarto_2;kwh_total;kwh_M_2_total\n"
+    file = open("resultados/data_base.csv", "w")
+    file.write(string)
+    file.close()
+
+"""
+apresenta erros no arquivo casa.err se tiver algum severe erros.
+verifica se teve erro e salva no arquivo "file name" três informações: .csv, .err e saída da simulação
+"""
+def save_original_files(file_name, sim_stdout):
+    separador = "\n\n\n"
+    file_new = open("resultados/csv_individual/"+file_name+".bk", "w")
+    csv_old = open("casa.csv", "r")
+    err_old = open("casa.err", "r")
+
+    err_old_string = err_old.read()
+    if not err_old_string.__contains__("0 Severe Errors; Elapse"):
+        print("Erro em:" + file_name)
+    
+
+    file_new.write(csv_old.read())
+    file_new.write(separador)
+    file_new.write(err_old_string)
+    file_new.write(separador)
+    file_new.write(sim_stdout)
+    file_new.close()
+    csv_old.close()
+    err_old.close()
+
+"""
+se o arquivo foi gerado, abre a base de dados (casa.csv = idf completo)
+"""
+def update_csv_data_base(sim_identification) -> bool:
+    arquivo = 'casa.csv'
+    if os.path.exists(arquivo):
+        data_base_csv_file = open("resultados/data_base.csv","a")
+        month_pattern = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+        csv_old = open("casa.csv", "r")
+        linhas = csv_old.readlines()
+        string = ""
+        flag_pattern_on = False
+        month_pattern_index = 0
+        for linha in linhas:
+            linha = linha.replace(" ", "")
+            linha = linha.replace("\n", "")
+            if len(linha) > 10:
+                if not flag_pattern_on:
+                    if linha.__contains__(month_pattern[month_pattern_index]):
+                        flag_pattern_on = True
+                
+                if flag_pattern_on:
+                    if linha.__contains__(month_pattern[month_pattern_index]):
+                        string += linha + "\n"
+                        month_pattern_index += 1
+                    else:
+                        string = ""
+                        flag_pattern_on = False
+                        month_pattern_index = 0
+                        if linha.__contains__(month_pattern[month_pattern_index]):
+                            flag_pattern_on = True
+                            string += linha + "\n"
+                            month_pattern_index += 1
+        csv_old.close()
+        string = string.removesuffix("\n")
+        linhas = string.split("\n")
+        string = ""
+        if len(linhas) != 12:
+            print("ERRO, LEITURA DO CSV COM MENOS DE 12 MESES")
+            return False
+        else:
+            i = 0
+            while i < 12:
+                linha_split = linhas[i].split(",")
+                if len(linha_split) != 9:
+                    print("ERRO, LEITURA DO CSV COM MENOS 9 COLUNAS")
+                    return False
+                nova_linha = ""
+                nova_linha += sim_identification
+                nova_linha += linha_split[0] + ","
+                nova_linha += linha_split[1] + ","
+                nova_linha += linha_split[2] + ","
+                nova_linha += linha_split[3] + ","
+                nova_linha += linha_split[4] + ","
+                kwh_1 = float(linha_split[7]) / 3600000
+                kwh_2 = float(linha_split[8]) / 3600000
+                kwh_total = kwh_1 + kwh_2
+                kwh_m_2 = str(kwh_total/36)
+                nova_linha += str(kwh_1) + ","
+                nova_linha += str(kwh_2) + ","
+                nova_linha += str(kwh_total) + ","
+                nova_linha += str(kwh_m_2)
+                string += nova_linha + "\n"
+                i+= 1
+            data_base_csv_file.write(string)
+            data_base_csv_file.close()
+            return True
+
+
+# após cada simulação, salva o arquivo original e gera uma entrada na minha base de dados csv
+def simulate(sim_identification):
+    energyPlus = "C:\\EnergyPlusV23-1-0\\RunEPlus"
+    weather = "weather_the"
+    casa = "C:\\Users\\julia\\codigoPython\\casa"
+    comando = [energyPlus,casa,weather]
+    result = subprocess.run(comando, shell=True, capture_output=True, text=True)
+    sim_stdout = result.stdout
+    save_original_files(sim_identification[0], sim_stdout)
+    update_csv_data_base(sim_identification[1])
+
+
+def identify_sim(vet_casa):
+    string_0 = "model_"
+    string_1 = ""
+    for vet in vet_casa:
+        string_0 += vet + "_"
+        string_1 += vet + ","
+    string_0 = string_0.removesuffix("_")
+    return [string_0,string_1]
+
+
+
+inicio = time.time()
+simulation = True
+
+if simulation:
+    initiate_files()
+    file_original = open("casa_original.idf", "r")
+    lines_original_file = file_original.readlines()
+    
+    orientation_list = ["0","90","180","270"]
+    
+    schedule_list_q1_VA = ["0HORAS","3HORAS","6HORAS","12HORAS","24HORAS"]
+    schedule_list_q2_VA = ["0HORAS","3HORAS","6HORAS","12HORAS","24HORAS"]
+    schedule_list_VN = ["VN_0","VN_3","VN_6","VN_12","VN_24"]
+    
+    windows_type = ["janela_metalon","janela_madeira","janela_vidro"]
+    
+    construction_wall_type = ["p_convencional","p_concreto_maciço","p_bloco_concreto","p_bloco_ceramico_14cm","p_isolante","p_bloco_concreto_isolante"]
+    construction_wall = []
+    construction_wall.append("Construction,parede_convencional,reboco_argamassa,bloco_ceramico,Ar paredes,bloco_ceramico,Ar paredes,bloco_ceramico,reboco_argamassa;")
+    construction_wall.append("Construction,parede_convencional,concreto_10cm;")
+    construction_wall.append("Construction,parede_convencional,reboco_argamassa,bloco_concreto,Ar paredes,bloco_concreto,reboco_argamassa;")
+    construction_wall.append("Construction,parede_convencional,reboco_argamassa,bloco_ceramico,Ar paredes,bloco_ceramico,Ar paredes,bloco_ceramico,Ar paredes,bloco_ceramico,reboco_argamassa;")
+    construction_wall.append("Construction,parede_convencional,reboco_argamassa,bloco_ceramico,Ar paredes,bloco_ceramico,Ar paredes,bloco_ceramico,laderocha_38mm,reboco_argamassa;")
+    construction_wall.append("Construction,parede_convencional,poliestireno_expandido,reboco_argamassa,bloco_concreto,Ar paredes,bloco_concreto,reboco_argamassa;")
+    
+    construction_roof_type = ["c_convencional","c_forro_PVC","c_laje_concreto","c_telha_met_isol_laje_maciça","c_telha_met_forro_pre_moldada","c_telha_cer_laderocha_pre_moldada"]
+    construction_roof = []
+    construction_roof.append("Construction,cobertura_convencional,telha_ceramica;")
+    construction_roof.append("Construction,cobertura_convencional,telha_ceramica,Ar cobertura,forro_PVC;")
+    construction_roof.append("Construction,cobertura_convencional,concreto_10cm;")
+    construction_roof.append("Construction,cobertura_convencional,telha_metalica_PU,Ar cobertura,concreto_10cm;")
+    construction_roof.append("Construction,cobertura_convencional,telha_metalica,Ar cobertura,argamassa_1cm,bloco_ceramico,Ar cobertura,bloco_ceramico,concreto_4cm;")
+    construction_roof.append("Construction,cobertura_convencional,telha_ceramica,Ar cobertura,laderocha_50mm,argamassa_1cm,bloco_ceramico,Ar cobertura,bloco_ceramico,concreto_4cm;")
+    house_model = []
+
+    for orientation in orientation_list:
+        for i, schedule_q1 in enumerate(schedule_list_q1_VA):  
+            for j, schedule_q2 in enumerate(schedule_list_q2_VA):
+                for window in windows_type:
+                    for k, const_wall_type in enumerate(construction_wall_type):
+                        for z, const_roof_type in enumerate(construction_roof_type):
+                           # gerando o identificador único da simulação
+                            house_model.append(orientation)
+                            house_model.append(schedule_q1)
+                            house_model.append(schedule_q2)
+                            house_model.append(window)
+                            house_model.append(const_wall_type)
+                            house_model.append(const_roof_type)
+                            new_model_string = ""
+
+                            flag_end = False
+                            # gera o novo arquivo idf com os parametros escolhidos/adotados 
+                            for line in lines_original_file:
+                                if not flag_end:
+                                    if line.__contains__("Building,"):
+                                        line = "Building,BrazilianSocialHousing,"+house_model[0]+",City,0.04,0.40,FullInteriorAndExterior,25,6;"+ "\n"
+                                    if line.__contains__("HVACTemplate:Thermostat,Quarto1"):
+                                        line = "HVACTemplate:Thermostat,Quarto1,,,"+house_model[1]+",;"+ "\n"
+                                    if line.__contains__("HVACTemplate:Thermostat,Quarto2"):
+                                        line = "HVACTemplate:Thermostat,Quarto2,,,"+house_model[2]+",;"+ "\n"
+                                    if line.__contains__("ZoneVentilation:DesignFlowRate,VN_Q1,"):
+                                        line = "ZoneVentilation:DesignFlowRate,VN_Q1,zone_2,"+schedule_list_VN[i]+",AirChanges/Hour,,,,10,Natural,,1,1,,,,22,,28,,0,,18,,32,,13.8;"+ "\n"
+                                    if line.__contains__("ZoneVentilation:DesignFlowRate,VN_Q2,"):
+                                        line = "ZoneVentilation:DesignFlowRate,VN_Q2,zone_3,"+schedule_list_VN[j]+",AirChanges/Hour,,,,10,Natural,,1,1,,,,22,,28,,0,,18,,32,,13.8;"+ "\n"
+                                    
+                                    if window == "janela_vidro":
+                                        if line.__contains__("FenestrationSurface:Detailed,janela_sala,"):
+                                            line = "FenestrationSurface:Detailed,janela_sala,Window,"+house_model[3]+",PAREDE_SL_EXT_OESTE,,autocalculate,,1,4,0,2.23,2.1,0,2.23,1.1,0,1.23,1.1,0,1.23,2.1;"+ "\n"
+                                        if line.__contains__("FenestrationSurface:Detailed,janela_Q1,"):
+                                            line = "FenestrationSurface:Detailed,janela_Q1,Window,"+house_model[3]+",PAREDE_Q1_EXT_OESTE,,autocalculate,,1,4,0,5.45,2.1,0,5.45,1.1,0,4.45,1.1,0,4.45,2.1;"+ "\n"
+                                        if line.__contains__("FenestrationSurface:Detailed,janela_Q2,"):
+                                            line = "FenestrationSurface:Detailed,janela_Q2,Window,"+house_model[3]+",PAREDE_Q2_EXT_LESTE,,autocalculate,,1,4,5.65,4.45,2.1,5.65,4.45,1.1,5.65,5.45,1.1,5.65,5.45,2.1;"+ "\n"
+                                    else:
+                                        if line.__contains__("FenestrationSurface:Detailed,janela_sala,"):
+                                            line = "FenestrationSurface:Detailed,janela_sala,Door,"+house_model[3]+",PAREDE_SL_EXT_OESTE,,autocalculate,,1,4,0,2.23,2.1,0,2.23,1.1,0,1.23,1.1,0,1.23,2.1;"+ "\n"
+                                        if line.__contains__("FenestrationSurface:Detailed,janela_Q1,"):
+                                            line = "FenestrationSurface:Detailed,janela_Q1,Door,"+house_model[3]+",PAREDE_Q1_EXT_OESTE,,autocalculate,,1,4,0,5.45,2.1,0,5.45,1.1,0,4.45,1.1,0,4.45,2.1;"+ "\n"
+                                        if line.__contains__("FenestrationSurface:Detailed,janela_Q2,"):
+                                            line = "FenestrationSurface:Detailed,janela_Q2,Door,"+house_model[3]+",PAREDE_Q2_EXT_LESTE,,autocalculate,,1,4,5.65,4.45,2.1,5.65,4.45,1.1,5.65,5.45,1.1,5.65,5.45,2.1;"+ "\n"
+                                    
+                                    if line.__contains__("Construction,parede_convencional,"):
+                                        line = construction_wall[k] + "\n"
+                                    
+                                    if line.__contains__("Construction,cobertura_convencional,"):
+                                        line = construction_roof[z] + "\n"
+                                        flag_end = True
+
+                                new_model_string += line #arquivo idf compelto atualizado
+
+                            file_new = open("casa.idf", "w")
+                            file_new.write(new_model_string)
+                            file_new.close()
+                            sim_identification = identify_sim(house_model)
+                            simulate(sim_identification) #rodar a simulação
+                            house_model.clear()
+        
+    file_original.close
+
+
+fim = time.time()
+print(fim - inicio)
